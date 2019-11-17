@@ -15,7 +15,9 @@
 #include <linux/err.h>
 #include <linux/rbtree_latch.h>
 #include <linux/numa.h>
+#include <linux/mm_types.h>
 #include <linux/wait.h>
+#include <linux/mutex.h>
 
 struct perf_event;
 struct bpf_prog;
@@ -41,6 +43,13 @@ struct bpf_map_ops {
 	u32 (*map_gen_lookup)(struct bpf_map *map, struct bpf_insn *insn_buf);
 	int (*map_attach)(struct bpf_map *map,
 			  struct bpf_prog *p1, struct bpf_prog *p2);
+	u32 (*map_fd_sys_lookup_elem)(void *ptr);
+	void (*map_seq_show_elem)(struct bpf_map *map, void *key,
+				  struct seq_file *m);
+	int (*map_check_btf)(const struct bpf_map *map,
+			     const struct btf_type *key_type,
+			     const struct btf_type *value_type);
+	int (*map_mmap)(struct bpf_map *map, struct vm_area_struct *vma);
 };
 
 struct bpf_map {
@@ -63,6 +72,24 @@ struct bpf_map {
 #ifdef CONFIG_SECURITY
 	void *security;
 #endif
+	u32 btf_key_type_id;
+	u32 btf_value_type_id;
+	struct btf *btf;
+	char name[BPF_OBJ_NAME_LEN];
+	u32 pages;
+	bool unpriv_array;
+	bool frozen; /* write-once; write-protected by freeze_mutex */
+	/* 22 bytes hole */
+
+	/* The 3rd and 4th cacheline with misc members to avoid false sharing
+	 * particularly with refcounting.
+	 */
+	struct user_struct *user ____cacheline_aligned;
+	atomic64_t refcnt;
+	atomic64_t usercnt;
+	struct work_struct work;
+	struct mutex freeze_mutex;
+	u64 writecnt; /* writable mmap cnt; protected by freeze_mutex */
 };
 
 /* function argument constraints */
@@ -360,6 +387,7 @@ void bpf_map_put_with_uref(struct bpf_map *map);
 void bpf_map_put(struct bpf_map *map);
 int bpf_map_precharge_memlock(u32 pages);
 void *bpf_map_area_alloc(size_t size, int numa_node);
+void *bpf_map_area_mmapable_alloc(size_t size, int numa_node);
 void bpf_map_area_free(void *base);
 
 extern int sysctl_unprivileged_bpf_disabled;
